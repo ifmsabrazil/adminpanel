@@ -872,7 +872,20 @@ export default function AGPage() {
             });
 
             if (!response.ok) {
-                throw new Error('Erro ao gerar relatório');
+                let errorMessage = 'Erro ao gerar relatório';
+
+                try {
+                    const errorData = await response.json();
+                    if (errorData?.details) {
+                        errorMessage = errorData.details;
+                    } else if (errorData?.error) {
+                        errorMessage = errorData.error;
+                    }
+                } catch {
+                    // Ignore JSON parsing failures and keep the fallback message.
+                }
+
+                throw new Error(errorMessage);
             }
 
             // Create download link
@@ -881,7 +894,7 @@ export default function AGPage() {
             const a = document.createElement('a');
             a.style.display = 'none';
             a.href = url;
-            a.download = `relatorio_completo_${assembly.name.replace(/[^a-zA-Z0-9]/g, '_')}.zip`;
+            a.download = `relatorio_completo_${assembly.name.replace(/[^a-zA-Z0-9]/g, '_')}.xlsx`;
             document.body.appendChild(a);
             a.click();
             window.URL.revokeObjectURL(url);
@@ -889,13 +902,13 @@ export default function AGPage() {
 
             toast({ 
                 title: "✅ Relatório Baixado", 
-                description: "Arquivo ZIP com dados da AG e comprovantes foi baixado com sucesso.",
+                description: "Planilha da AG baixada com sucesso. Os comprovantes ficam acessíveis pelos links na aba de inscrições.",
             });
         } catch (error) {
             console.error("Error downloading report:", error);
             toast({ 
                 title: "❌ Erro", 
-                description: "Erro ao baixar relatório. Tente novamente.", 
+                description: error instanceof Error ? error.message : "Erro ao baixar relatório. Tente novamente.", 
                 variant: "destructive" 
             });
         }

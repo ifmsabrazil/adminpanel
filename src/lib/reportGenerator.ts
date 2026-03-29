@@ -353,17 +353,42 @@ export const downloadReport = (buffer: ArrayBuffer, filename: string): void => {
         throw error;
     }
 
-    // Sanitize filename to prevent security issues
-    const sanitizedFilename = filename.replace(/[<>:"/\\|?*]/g, '_');
-
     try {
         // Create blob from buffer
         const dataBlob = new Blob([buffer], { 
             type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
         });
         
+        downloadBlob(dataBlob, filename);
+        console.log(`File "${filename}" downloaded successfully`);
+    } catch (error) {
+        console.error("Error during file download:", error);
+        throw new Error(`Failed to download file "${filename}": ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+};
+
+/**
+ * Downloads a blob with the specified filename
+ */
+export const downloadBlob = (blob: Blob, filename: string): void => {
+    if (!blob || !(blob instanceof Blob)) {
+        const error = new Error("Invalid blob: blob must be a valid Blob");
+        console.error("downloadBlob validation error:", error);
+        throw error;
+    }
+
+    if (!filename || typeof filename !== 'string' || filename.trim() === '') {
+        const error = new Error("Invalid filename: filename must be a non-empty string");
+        console.error("downloadBlob validation error:", error);
+        throw error;
+    }
+
+    // Sanitize filename to prevent security issues
+    const sanitizedFilename = filename.replace(/[<>:"/\\|?*]/g, '_');
+
+    try {
         // Create download link
-        const url = URL.createObjectURL(dataBlob);
+        const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
         link.download = sanitizedFilename;
@@ -373,10 +398,8 @@ export const downloadReport = (buffer: ArrayBuffer, filename: string): void => {
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
-        
-        console.log(`File "${sanitizedFilename}" downloaded successfully`);
     } catch (error) {
         console.error("Error during file download:", error);
         throw new Error(`Failed to download file "${sanitizedFilename}": ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-}; 
+};

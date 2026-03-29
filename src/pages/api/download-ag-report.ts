@@ -1,6 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import * as XLSX from 'xlsx';
-import JSZip from 'jszip';
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../convex/_generated/api';
 
@@ -18,6 +17,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // Initialize Convex client
     const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
+    const forwardedProto = req.headers['x-forwarded-proto'];
+    const protocol = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+    const forwardedHost = req.headers['x-forwarded-host'];
+    const host = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost ?? req.headers.host;
+    const baseUrl = host ? `${protocol ?? 'https'}://${host}` : process.env.NEXTAUTH_URL;
 
     // Fetch assembly data
     const assemblyData = await convex.query(api.assemblies.getAssemblyDataForReport, {
@@ -68,10 +72,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       assemblyData.modalities.map((m) => [m._id, m.name])
     );
 
+    const getReceiptLink = (storageId?: string) => {
+      if (!storageId || !baseUrl) {
+        return '';
+      }
+
+      return new URL(`/api/download-ag-receipt?storageId=${encodeURIComponent(storageId)}`, baseUrl).toString();
+    };
+
     // Registrations Sheet
     if (assemblyData.registrations.length > 0) {
       const registrationsData = [
-        ['ID', 'Nome', 'Tipo', 'Email', 'Status', 'Data de Inscrição', 'Modalidade', 'Escola', 'Regional', 'Cidade', 'UF', 'Celular', 'CPF', 'Data Nascimento', 'Isento Pagamento', 'Tem Comprovante', 'Arquivo Comprovante'],
+        ['ID', 'Nome', 'Tipo', 'Email', 'Status', 'Data de Inscrição', 'Modalidade', 'Escola', 'Regional', 'Cidade', 'UF', 'Celular', 'CPF', 'Data Nascimento', 'Isento Pagamento', 'Tem Comprovante', 'Arquivo Comprovante', 'Link do Comprovante'],
         ...assemblyData.registrations.map(r => [
           r.participantId, r.participantName, r.participantType, r.email, r.status,
           new Date(r.registeredAt).toLocaleDateString('pt-BR'), 
@@ -80,10 +92,38 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           r.celular || '', r.cpf || '', r.dataNascimento || '',
           r.isPaymentExempt ? 'Sim' : 'Não',
           r.receiptStorageId ? 'Sim' : 'Não',
-          r.receiptFileName || ''
+          r.receiptFileName || '',
+          r.receiptStorageId ? 'Abrir comprovante' : ''
         ])
       ];
       const registrationsWs = XLSX.utils.aoa_to_sheet(registrationsData);
+
+      assemblyData.registrations.forEach((registration, index) => {
+        if (!registration.receiptStorageId) {
+          return;
+        }
+
+        const cellAddress = XLSX.utils.encode_cell({ r: index + 1, c: 17 });
+        const receiptLink = getReceiptLink(registration.receiptStorageId);
+
+        if (!receiptLink) {
+          registrationsWs[cellAddress] = {
+            t: 's',
+            v: 'Link indisponível',
+          };
+          return;
+        }
+
+        registrationsWs[cellAddress] = {
+          t: 's',
+          v: 'Abrir comprovante',
+          l: {
+            Target: receiptLink,
+            Tooltip: registration.receiptFileName || 'Abrir comprovante',
+          },
+        };
+      });
+
       XLSX.utils.book_append_sheet(workbook, registrationsWs, 'Inscrições');
     }
 
@@ -120,62 +160,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // Generate Excel buffer
     const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
 
-    // Create ZIP file
-    const zip = new JSZip();
-    
-    // Add Excel file to ZIP
-    const excelFileName = `relatorio_${assemblyData.assembly.name.replace(/[^a-zA-Z0-9]/g, '_')}.xlsx`;
-    zip.file(excelFileName, excelBuffer);
-
-    // Add payment receipts folder
-    const receiptsFolder = zip.folder('comprovantes_pagamento');
-    
-    // Add actual receipt files
-    const registrationsWithReceipts = assemblyData.registrations.filter(r => r.receiptStorageId);
-    
-    if (registrationsWithReceipts.length > 0) {
-      // Download and add each receipt file to the ZIP
-      for (const registration of registrationsWithReceipts) {
-        try {
-          // Get file URL from Convex
-          const fileUrl = await convex.query(api.files.getFileUrl, {
-            storageId: registration.receiptStorageId!
-          });
-
-          if (fileUrl) {
-            // Download file
-            const fileResponse = await fetch(fileUrl);
-            if (fileResponse.ok) {
-              const buffer = await fileResponse.arrayBuffer();
-              const fileName = registration.receiptFileName || `comprovante_${registration.participantId}.pdf`;
-              receiptsFolder?.file(fileName, buffer);
-            }
-          }
-        } catch (error) {
-          console.warn(`Failed to download receipt file for ${registration.participantName}:`, error);
-        }
-      }
-    }
-
-    // Add summary file
-    receiptsFolder?.file('README.txt', 
-      `Comprovantes de Pagamento - ${assemblyData.assembly.name}\n\n` +
-      `Total de inscrições: ${assemblyData.registrations.length}\n` +
-      `Inscrições com comprovante: ${registrationsWithReceipts.length}\n` +
-      `Gerado em: ${new Date().toLocaleString('pt-BR')}`
-    );
-
-    // Generate ZIP buffer
-    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
-
     // Set response headers for file download
-    const fileName = `relatorio_completo_${assemblyData.assembly.name.replace(/[^a-zA-Z0-9]/g, '_')}_${new Date().toISOString().split('T')[0]}.zip`;
-    res.setHeader('Content-Type', 'application/zip');
+    const fileName = `relatorio_completo_${assemblyData.assembly.name.replace(/[^a-zA-Z0-9]/g, '_')}_${new Date().toISOString().split('T')[0]}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    res.setHeader('Content-Length', zipBuffer.length);
+    res.setHeader('Content-Length', excelBuffer.length);
 
-    // Send the ZIP file
-    res.send(zipBuffer);
+    // Send the Excel file
+    res.send(excelBuffer);
 
   } catch (error) {
     console.error('Error generating AG report:', error);
